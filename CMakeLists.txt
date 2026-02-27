@@ -1,0 +1,147 @@
+cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
+project(ncaf VERSION 0.1)
+set(CMAKE_OSX_SYSROOT "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk")
+include(cmake/CPM.cmake)
+include(CMakePackageConfigHelpers)
+
+# ------------------- global setups -------------------
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  add_compile_options(-fdiagnostics-color=always)
+endif()
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE INTERNAL "")
+if(MSVC)
+  add_compile_options(/EHsc)
+  add_compile_options(/bigobj)
+endif()
+# ------------------- dependencies -------------------
+# When C++26 is ready, I'll add a build option to switch to the real std::execution in C++26,
+# allow you to remove the dependency on stdexec. Stay tuned!
+CPMAddPackage(
+  NAME stdexec
+  GITHUB_REPOSITORY NVIDIA/stdexec
+  GIT_TAG 770f7959142c2446319f642c82aed8b07aea3f86
+  OPTIONS "BUILD_TESTING OFF"
+  OPTIONS "STDEXEC_BUILD_EXAMPLES OFF"
+)
+
+# reflect-cpp with Cap'n Proto for actor message serialization
+CPMAddPackage(
+  NAME zlib-cmake
+  GITHUB_REPOSITORY jimmy-park/zlib-cmake
+  GIT_TAG edc9d59d34ea33b1fae4f40268bc69a6d5dd70c0
+  OPTIONS "ZLIB_TEST OFF"
+  OPTIONS "ZLIB_INSTALL ON"
+)
+CPMAddPackage(
+  NAME CapnProto
+  GITHUB_REPOSITORY capnproto/capnproto
+  GIT_TAG v1.2.0
+  OPTIONS "BUILD_TESTING OFF"
+  OPTIONS "CMAKE_CXX_FLAGS -w"
+)
+CPMAddPackage(
+  NAME reflectcpp
+  GITHUB_REPOSITORY getml/reflect-cpp
+  GIT_TAG 2b1cd836776c55646d1bc92204da1362ed652bda
+  OPTIONS "REFLECTCPP_BUILD_BENCHMARKS OFF"
+  OPTIONS "REFLECTCPP_JSON OFF"
+  OPTIONS "REFLECTCPP_CAPNPROTO ON"
+  OPTIONS "REFLECTCPP_INSTALL ON"
+)
+
+# libzmq + cppzmq for message passing in distributed mode
+CPMAddPackage(
+  NAME libzmq
+  GITHUB_REPOSITORY zeromq/libzmq
+  GIT_TAG master  # 使用最新的 master 分支
+  OPTIONS "CMAKE_CXX_FLAGS -w"
+  OPTIONS "BUILD_TESTS OFF"
+  OPTIONS "BUILD_SHARED OFF"
+  OPTIONS "WITH_TLS OFF"
+  OPTIONS "WITH_LIBSODIUM OFF"
+  OPTIONS "WITH_GSSAPI OFF"
+)
+CPMAddPackage(
+  NAME cppzmq
+  GITHUB_REPOSITORY zeromq/cppzmq
+  GIT_TAG v4.11.0
+  OPTIONS "CPPZMQ_BUILD_TESTS OFF"
+)
+
+CPMAddPackage(
+  NAME spdlog
+  GITHUB_REPOSITORY gabime/spdlog
+  GIT_TAG v1.16.0
+  OPTIONS "SPDLOG_INSTALL ON"
+)
+
+# ------------------- targets -------------------
+add_library(
+  ncaf
+  STATIC
+  src/ncaf/internal/network.cc
+  src/ncaf/internal/actor_registry.cc
+  src/ncaf/internal/logging.cc
+)
+target_include_directories(ncaf PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(
+  ncaf
+  PUBLIC
+  STDEXEC::stdexec
+  reflectcpp::reflectcpp
+  cppzmq-static
+  spdlog::spdlog
+)
+# Link libatomic for 128-bit atomic operations when the platform provides it.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  include(CheckLibraryExists)
+  check_library_exists(atomic __atomic_fetch_add_8 "" EX_ACTOR_HAS_LIBATOMIC)
+  if(EX_ACTOR_HAS_LIBATOMIC)
+    target_link_libraries(ncaf PUBLIC atomic)
+  endif()
+endif()
+# to suppress subobject linkage warnings in stdexec
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  target_compile_options(ncaf INTERFACE -Wno-subobject-linkage)
+endif()
+add_library(ncaf::ncaf ALIAS ncaf)
+
+# ------------------- tests -------------------
+option(EX_ACTOR_BUILD_TESTS "Build tests" ON)
+if(EX_ACTOR_BUILD_TESTS)
+  CPMAddPackage(
+    NAME googletest
+    GITHUB_REPOSITORY google/googletest
+    GIT_TAG b2b9072ecbe874f5937054653ef8f2731eb0f010
+    OPTIONS
+    "INSTALL_GTEST OFF"
+    "gtest_force_shared_crt ON"
+  )
+  enable_testing()
+  add_subdirectory(test)
+endif()
+
+# ------------------- install -------------------
+install(TARGETS ncaf EXPORT ncaf-targets)
+install(DIRECTORY include/ DESTINATION include)
+install(
+  EXPORT ncaf-targets
+  NAMESPACE ncaf::
+  DESTINATION lib/cmake/ncaf
+)
+
+configure_package_config_file(
+  cmake/ncaf-config.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/ncaf-config.cmake
+  INSTALL_DESTINATION lib/cmake/ncaf
+)
+
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/ncaf-config.cmake
+  DESTINATION lib/cmake/ncaf
+)
